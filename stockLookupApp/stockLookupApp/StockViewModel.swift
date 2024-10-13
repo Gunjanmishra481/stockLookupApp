@@ -1,152 +1,76 @@
 import Foundation
-import Combine
 
 class StockViewModel: ObservableObject {
+    
     @Published var stockSymbol: String = ""
-    @Published var companyName: String = ""
-    @Published var currentPrice: Double?
-    @Published var priceChange: Double?
-    @Published var percentChange: Double?
-    @Published var isLoading: Bool = false
-    @Published var hasError: Bool = false
-    @Published var errorMessage: String?
-
-    private let apiKey = "042e799f55msh76dcf4182b36b9ep1cb2f9jsn7691ad93d01b"
+    @Published var stockName: String = ""
+    @Published var stockExchange: String = ""
+    @Published var errorMessage: String = ""
     
-
-    // Define cancellables to store subscriptions
-    var cancellables = Set<AnyCancellable>()
-
-    func fetchStockData() {
-        self.companyName = ""
-        self.currentPrice = nil
-        self.priceChange = nil
-        self.percentChange = nil
-        self.errorMessage = nil
-        self.isLoading = true
-        self.hasError = false
+    private let rapidAPIKey = "042e799f55msh76dcf4182b36b9ep1cb2f9jsn7691ad93d01b"  // Replace with your API key
+    
+    // Function to fetch stock info using the Yahoo Finance Autocomplete API
+    func fetchStockInfo(for symbol: String) {
+        let headers = [
+            "x-rapidapi-key": rapidAPIKey,
+            "x-rapidapi-host": "yahoo-finance166.p.rapidapi.com"
+        ]
         
-        let symbol = stockSymbol.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !symbol.isEmpty else {
-            self.errorMessage = "Please enter a stock symbol."
-            self.hasError = true
-            self.isLoading = false
+        let urlString = "https://yahoo-finance166.p.rapidapi.com/api/autocomplete?query=\(symbol)"
+        guard let url = URL(string: urlString) else {
+            DispatchQueue.main.async {
+                self.errorMessage = "Invalid URL"
+            }
             return
         }
         
-        let dispatchGroup = DispatchGroup()
-        var fetchedQuote: StockQuote?
-        var fetchedCompany: CompanyProfile?
+        var request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 10.0)
+        request.httpMethod = "GET"
+        request.allHTTPHeaderFields = headers
         
-        dispatchGroup.enter()
-        fetchQuote(for: symbol) { result in
-            switch result {
-            case .success(let quote):
-                fetchedQuote = quote
-            case .failure(let error):
-                DispatchQueue.main.async {
-                    self.errorMessage = error.localizedDescription
-                    self.hasError = true
+        let session = URLSession.shared
+        let dataTask = session.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    self.errorMessage = "Error: \(error.localizedDescription)"
+                    return
                 }
+                
+                guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+                    self.errorMessage = "Server error"
+                    return
+                }
+                
+                guard let data = data else {
+                    self.errorMessage = "No data received"
+                    return
+                }
+                
+                // Parse the JSON data
+                self.parseStockData(data: data)
             }
-            dispatchGroup.leave()
         }
         
-        dispatchGroup.enter()
-        fetchCompany(for: symbol) { result in
-            switch result {
-            case .success(let company):
-                fetchedCompany = company
-            case .failure(let error):
-                DispatchQueue.main.async {
-                    self.errorMessage = error.localizedDescription
-                    self.hasError = true
+        dataTask.resume()
+    }
+    
+    // Function to parse the JSON data and extract relevant stock info
+    private func parseStockData(data: Data) {
+        do {
+            if let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
+                if let quotes = json["quotes"] as? [[String: Any]], let firstQuote = quotes.first {
+                    self.stockSymbol = firstQuote["symbol"] as? String ?? "N/A"
+                    self.stockName = firstQuote["shortname"] as? String ?? "N/A"
+                    self.stockExchange = firstQuote["exchDisp"] as? String ?? "N/A"
+                    self.errorMessage = ""
+                } else {
+                    self.errorMessage = "No stock information found."
                 }
-            }
-            dispatchGroup.leave()
-        }
-        
-        dispatchGroup.notify(queue: .main) {
-            self.isLoading = false
-            if self.hasError {
-                return
-            }
-            if let quote = fetchedQuote, let company = fetchedCompany {
-                self.companyName = company.name ?? symbol
-                self.currentPrice = quote.currentPrice
-                let change = quote.currentPrice - quote.previousClose
-                self.priceChange = change
-                self.percentChange = quote.previousClose != 0 ? (change / quote.previousClose) * 100 : 0
             } else {
-                self.errorMessage = "Failed to fetch data."
-                self.hasError = true
+                self.errorMessage = "Invalid response format"
             }
-        }
-    }
-    
-    private func fetchQuote(for symbol: String, completion: @escaping (Result<StockQuote, Error>) -> Void) {
-        let urlString = "https://finnhub.io/api/v1/quote?symbol=\(symbol)&token=\(apiKey)"
-        guard let url = URL(string: urlString) else {
-            completion(.failure(APIError.invalidURL))
-            return
-        }
-        URLSession.shared.dataTask(with: url) { data, response, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
-            guard let data = data else {
-                completion(.failure(APIError.noData))
-                return
-            }
-            do {
-                let quote = try JSONDecoder().decode(StockQuote.self, from: data)
-                completion(.success(quote))
-            } catch {
-                completion(.failure(error))
-            }
-        }.resume()
-    }
-    
-    private func fetchCompany(for symbol: String, completion: @escaping (Result<CompanyProfile, Error>) -> Void) {
-        let urlString = "https://finnhub.io/api/v1/stock/profile2?symbol=\(symbol)&token=\(apiKey)"
-        guard let url = URL(string: urlString) else {
-            completion(.failure(APIError.invalidURL))
-            return
-        }
-        URLSession.shared.dataTask(with: url) { data, response, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
-            guard let data = data else {
-                completion(.failure(APIError.noData))
-                return
-            }
-            do {
-                let company = try JSONDecoder().decode(CompanyProfile.self, from: data)
-                completion(.success(company))
-            } catch {
-                completion(.failure(error))
-            }
-        }.resume()
-    }
-
-    enum APIError: Error, LocalizedError {
-        case invalidURL
-        case noData
-        case invalidSymbol
-        
-        var errorDescription: String? {
-            switch self {
-            case .invalidURL:
-                return "Invalid URL."
-            case .noData:
-                return "No data received."
-            case .invalidSymbol:
-                return "Invalid stock symbol."
-            }
+        } catch {
+            self.errorMessage = "Failed to parse data"
         }
     }
 }
-
